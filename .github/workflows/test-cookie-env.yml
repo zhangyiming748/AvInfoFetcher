@@ -1,0 +1,36 @@
+name: test-cookie-env
+
+# 独立的环境变量连通性测试：只验证 Repository secret AV_FETCH_COOKIE
+# 是否能被 Go 测试读取到，不执行抓取、不提交任何代码。
+# 用法：Actions 页面选择本工作流 → Run workflow。
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test-env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify AV_FETCH_COOKIE is injected
+        env:
+          AV_FETCH_COOKIE: ${{ secrets.AV_FETCH_COOKIE }}
+        run: |
+          # 只验证变量是否非空，绝不打印内容
+          if [[ -z "${AV_FETCH_COOKIE}" ]]; then
+            echo "::error::环境变量 AV_FETCH_COOKIE 为空，请检查 Repository secret 是否已配置且名称完全一致"
+            exit 1
+          fi
+          echo "已注入 AV_FETCH_COOKIE（长度 ${#AV_FETCH_COOKIE} 字符，内容已隐藏）"
+
+      - name: Run env cookie unit test
+        env:
+          AV_FETCH_COOKIE: ${{ secrets.AV_FETCH_COOKIE }}
+        run: go test ./util/ -run TestAVFetchCookieEnv -v
