@@ -1,0 +1,46 @@
+name: fetch-av-info
+
+on:
+  schedule:
+    # 每天 UTC 16:00（北京时间次日 00:00）跑一次
+    - cron: "0 16 * * *"
+  workflow_dispatch: {} # 也支持手动触发
+
+permissions:
+  contents: write # 允许 workflow 提交并推送
+
+concurrency:
+  group: fetch-av-info
+  cancel-in-progress: false # 避免多次运行同时写 vid.csv
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install translate-shell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y translate-shell
+
+      - name: Run fetcher
+        run: go run main.go
+
+      - name: Commit and push if changed
+        run: |
+          if [[ -n "$(git status --porcelain vid.csv)" ]]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add vid.csv
+            git commit -m "chore: update vid.csv [skip ci]"
+            git push
+          else
+            echo "vid.csv 无变化，跳过提交"
+          fi
