@@ -118,7 +118,7 @@ func configureCookies(host string) {
 }
 
 // searchURL 搜索页地址模板，%s 为 URL 编码后的番号
-const searchURL = "https://www.javbus.com/search/%s"
+const searchURL = "https://javdb.com/search?q=%s&f=all"
 
 // FetchInfo 根据番号抓取原文标题和主要演员。
 func FetchInfo(code string) (*Info, error) {
