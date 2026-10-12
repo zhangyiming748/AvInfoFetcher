@@ -61,7 +61,6 @@ func main() {
 		// 回写内存中的该行
 		row[util.ColOriginalTitle] = strings.TrimSpace(info.OriginalTitle)
 		row[util.ColChineseTitle] = strings.TrimSpace(zh)
-		row[util.ColActors] = strings.TrimSpace(info.Actors)
 		records[i] = row
 
 		// 每处理完一条立即落盘，防止中途超时/崩溃丢掉结果

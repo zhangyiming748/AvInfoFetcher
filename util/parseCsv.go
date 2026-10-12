@@ -6,19 +6,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// CSV 各列下标，对应表头：番号,原文标题,中文标题,主要演员,备注
+// utf8BOM Excel 打开中文 CSV 时需要的 UTF-8 BOM，读写时都保留
+const utf8BOM = "\xef\xbb\xbf"
+
+// CSV 各列下标，对应表头：番号,原文标题,中文标题,备注
 const (
 	ColCode          = 0 // 番号
 	ColOriginalTitle = 1 // 原文标题
 	ColChineseTitle  = 2 // 中文标题
-	ColActors        = 3 // 主要演员
-	ColRemark        = 4 // 备注
+	ColRemark        = 3 // 备注
 )
 
-// MinCols 一行至少应有的列数（含备注列）
-const MinCols = 5
+// MinCols 一行至少应有的列数
+const MinCols = 4
 
 // LoadCSV 读取整个 CSV 文件，返回全部行（含表头）。
 // 短行会自动补齐到 MinCols 列，方便后续按下标写入。
@@ -44,6 +47,10 @@ func LoadCSV(path string) ([][]string, error) {
 		}
 		records = append(records, padRow(row, MinCols))
 	}
+	if len(records) > 0 {
+		// 去掉可能存在的 UTF-8 BOM，避免把 BOM 当成“番号”表头的一部分
+		records[0][0] = strings.TrimPrefix(records[0][0], utf8BOM)
+	}
 	return records, nil
 }
 
@@ -65,6 +72,11 @@ func SaveCSV(path string, records [][]string) error {
 	}()
 
 	w := csv.NewWriter(tmp)
+	// 先写 UTF-8 BOM，保证 Excel 打开中文不乱码
+	if _, err := tmp.WriteString(utf8BOM); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := w.WriteAll(records); err != nil {
 		_ = tmp.Close()
 		return err

@@ -17,7 +17,6 @@ import (
 // Info 爬虫根据番号查到的信息
 type Info struct {
 	OriginalTitle string // 原文标题
-	Actors        string // 主要演员（多人时自行决定分隔符，如逗号）
 }
 
 // ---- soup 发 GET 请求时携带 Cookie 的两种方式 ----
@@ -117,17 +116,22 @@ func configureCookies(host string) {
 	}
 }
 
-// searchURL 搜索页地址模板，%s 为 URL 编码后的番号
-const searchURL = "https://javdb.com/search?q=%s&f=all"
+// 搜索页地址与站点根地址
+const (
+	siteBase  = "https://javdb.com"
+	searchURL = siteBase + "/search?q=%s&f=all"
+)
 
-// FetchInfo 根据番号抓取原文标题和主要演员。
+// FetchInfo 根据番号抓取原文标题。
 func FetchInfo(code string) (*Info, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
 		return nil, errors.New("番号为空")
 	}
 
-	target := fmt.Sprintf(searchURL, url.PathEscape(code))
+	// q 是 query 参数，必须用 QueryEscape 而不是 PathEscape
+	// （空格应编码成 + 而非 %20，& 等字符也要转义，避免破坏查询串）
+	target := fmt.Sprintf(searchURL, url.QueryEscape(code))
 	targetURL, _ := url.Parse(target)
 	host := targetURL.Hostname()
 
@@ -144,51 +148,48 @@ func FetchInfo(code string) (*Info, error) {
 	}
 	doc := soup.HTMLParse(html)
 
-	// TODO: 以下选择器需要按目标站点真实 HTML 结构核对/调整。
-	// 当前以 javbus 搜索结果页的常见结构为例：
-	//   搜索结果的影片链接在 .movie-box 内的 a[href]
-	link := doc.Find("a", "class", "movie-box")
+	// TODO: 以下选择器以 javdb 搜索页结构为准，如站点改版需核对。
+	// 搜索结果列表 div.movie-list 内，每个 div.item 的第一个 a 指向详情页（href 形如 /v/xxxx）
+	link := doc.Find("div", "class", "movie-list").Find("div", "class", "item").Find("a")
 	if link.Error != nil {
 		return nil, fmt.Errorf("未找到 %s 的搜索结果: %v", code, link.Error)
 	}
-	detailURL := link.Attrs()["href"]
-	if detailURL == "" {
+	detailPath := link.Attrs()["href"]
+	if detailPath == "" {
 		return nil, fmt.Errorf("未找到 %s 的详情页链接", code)
+	}
+	// href 可能是相对路径，统一拼成绝对地址
+	if strings.HasPrefix(detailPath, "/") {
+		detailPath = siteBase + detailPath
 	}
 
 	// 详情页（cookie / header 已在上面设置过，全局生效）
-	detailHTML, err := soup.Get(detailURL)
+	detailHTML, err := soup.Get(detailPath)
 	if err != nil {
 		return nil, fmt.Errorf("请求详情页失败: %w", err)
 	}
 	detail := soup.HTMLParse(detailHTML)
 
-	// 原文标题：详情页 <h2>（影片名）
-	titleNode := detail.Find("h2")
+	// 原文标题：详情页 <h2 class="title">
+	// 其中 <strong class="current-title"> 是番号本身，真正的标题通常在
+	// <span class="origin-name">（原文名）或标题节点的剩余文本里。
+	titleNode := detail.Find("h2", "class", "title")
 	if titleNode.Error != nil {
 		return nil, fmt.Errorf("未找到原文标题: %v", titleNode.Error)
 	}
-	title := strings.TrimSpace(titleNode.FullText())
+	title := ""
+	if origin := titleNode.Find("span", "class", "origin-name"); origin.Error == nil {
+		title = origin.FullText()
+	}
+	if strings.TrimSpace(title) == "" {
+		title = titleNode.FullText()
+	}
+	title = strings.TrimSpace(title)
 	if title == "" {
 		return nil, errors.New("原文标题为空")
 	}
 
-	// 主要演员：出演者列表中的所有链接文本，多人用逗号拼接
-	var actors []string
-	starBox := detail.Find("div", "id", "avatar-waterfall")
-	if starBox.Error == nil {
-		for _, a := range starBox.FindAll("span") {
-			name := strings.TrimSpace(a.Text())
-			if name != "" {
-				actors = append(actors, name)
-			}
-		}
-	}
-
-	return &Info{
-		OriginalTitle: title,
-		Actors:        strings.Join(actors, ","),
-	}, nil
+	return &Info{OriginalTitle: title}, nil
 }
 
 // translateMaxRetry 翻译失败时的最大尝试次数（含首次）

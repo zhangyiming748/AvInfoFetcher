@@ -5,7 +5,7 @@
 # 用法:
 #   1) 就地过滤文件（默认）：只保留与指定域名相关的条目，直接改写文件，自动备份
 #        ./scripts/cookies2secret.sh <域名> <cookies.txt>
-#        例: ./scripts/cookies2secret.sh javbus.com cookies.txt
+#        例: ./scripts/cookies2secret.sh javdb.com cookies.txt
 #
 #   2) 查看文件里都有哪些域名:
 #        ./scripts/cookies2secret.sh --list-domains <cookies.txt>
@@ -13,7 +13,7 @@
 #   3) 过滤并输出单行 Cookie（不改动原文件，用于粘贴进 GitHub Secret）:
 #        ./scripts/cookies2secret.sh --secret <域名> <cookies.txt>
 #
-# 域名匹配为双向匹配：javbus.com 可匹配 www.javbus.com / .javbus.com，反之亦然。
+# 域名匹配为双向匹配：javdb.com 可匹配 www.javdb.com / .javdb.com，反之亦然。
 
 set -euo pipefail
 
