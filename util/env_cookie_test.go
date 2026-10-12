@@ -21,7 +21,7 @@ func TestAVFetchCookieEnv(t *testing.T) {
 	t.Logf("已读到 AV_FETCH_COOKIE：总长度 %d 字符，共 %d 行", len(raw), lines(raw))
 
 	// 用搜索站点域名跑一遍解析，确认格式能被识别
-	const host = "www.javbus.com"
+	const host = "www.javdb.com"
 	pairs := parseCookieEnv(raw, host)
 	t.Logf("按目标域名 %s 过滤后解析出 %d 条 cookie", host, len(pairs))
 	for _, c := range pairs {
