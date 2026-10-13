@@ -1,2 +1,5 @@
 .DS_Store
 *cookies.txt*
+fetch.log
+util/detail.html
+util/search.html

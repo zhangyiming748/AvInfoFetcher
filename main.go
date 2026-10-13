@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -42,6 +43,13 @@ func main() {
 		log.Printf("[查询] %s ...", code)
 		info, err := util.FetchInfo(code)
 		if err != nil {
+			if errors.Is(err, util.ErrNotFound) {
+				// 番号在库里不存在（或只有相似推荐）：跳过本条，
+				// 不算失败、不回写，下次运行还会再试（结果一般仍是未找到）
+				log.Printf("[未找到] %s 没有准确匹配的结果，跳过本条", code)
+				time.Sleep(requestInterval)
+				continue
+			}
 			// 查询失败：不回写，保持空白，下次运行自动重试
 			log.Printf("[失败] %s 抓取信息出错: %v（本次跳过，下次重试）", code, err)
 			failed++

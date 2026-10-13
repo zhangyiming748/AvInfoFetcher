@@ -4,19 +4,38 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/anaskhan96/soup"
 )
 
+// fetchLogger 同时输出到控制台与工作目录下的 fetch.log（追加写），
+// 用于记录每次 HTTP 请求的结果（成功/失败/疑似拦截），事后可排查。
+var fetchLogger *log.Logger
+
+func init() {
+	f, err := os.OpenFile("fetch.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		// 文件打不开时不 fatal，退化为只写控制台
+		fetchLogger = log.New(os.Stdout, "[FETCH] ", log.LstdFlags)
+		fetchLogger.Printf("警告：无法打开 fetch.log（%v），日志仅输出到控制台", err)
+		return
+	}
+	fetchLogger = log.New(io.MultiWriter(os.Stdout, f), "[FETCH] ", log.LstdFlags)
+}
+
 // Info 爬虫根据番号查到的信息
 type Info struct {
-	OriginalTitle string // 原文标题
+	OriginalTitle string   // 原文标题
+	Actors        []string // 主要演员
 }
 
 // ---- soup 发 GET 请求时携带 Cookie 的两种方式 ----
@@ -106,14 +125,42 @@ func parseCookieEnv(raw, host string) []cookiePair {
 }
 
 // configureCookies 读取环境变量并把 cookie 设置到 soup 的全局配置中。
-func configureCookies(host string) {
+// 返回实际加载的 Cookie 数量，便于日志排查。
+func configureCookies(host string) int {
 	raw := strings.TrimSpace(os.Getenv("AV_FETCH_COOKIE"))
 	if raw == "" {
-		return
+		return 0
 	}
-	for _, c := range parseCookieEnv(raw, host) {
+	pairs := parseCookieEnv(raw, host)
+	for _, c := range pairs {
 		soup.Cookie(c.Name, c.Value)
 	}
+	return len(pairs)
+}
+
+// ErrCloudflareBlocked 表示请求被 Cloudflare 等防护页拦截（返回 200 但内容是拦截页）。
+var ErrCloudflareBlocked = errors.New("请求被 Cloudflare 拦截")
+
+// httpGet 发 GET 请求并记录日志。返回内容；如被拦截则返回 ErrCloudflareBlocked。
+func httpGet(url string) (string, error) {
+	fetchLogger.Printf("GET %s", url)
+	html, err := soup.Get(url)
+	if err != nil {
+		fetchLogger.Printf("FAIL %s -> %v", url, err)
+		return "", fmt.Errorf("请求失败: %w", err)
+	}
+
+	// Cloudflare 拦截页特征（正常详情页含 Cloudflare analytics，但不会是 Just a moment 标题）
+	lower := strings.ToLower(html)
+	if strings.Contains(lower, "just a moment") ||
+		strings.Contains(lower, "attention required") ||
+		strings.Contains(lower, "cloudflare") && strings.Contains(lower, "verify you are human") {
+		fetchLogger.Printf("BLOCKED %s (Cloudflare/Just a moment), len=%d", url, len(html))
+		return "", ErrCloudflareBlocked
+	}
+
+	fetchLogger.Printf("OK %s len=%d", url, len(html))
+	return html, nil
 }
 
 // 搜索页地址与站点根地址
@@ -121,6 +168,132 @@ const (
 	siteBase  = "https://javdb.com"
 	searchURL = siteBase + "/search?q=%s&f=all"
 )
+
+// normalizeCode 归一化番号用于比对：转小写并只保留字母和数字，
+// 即连字符 "-"、下划线 "_"、空白等分隔符一律忽略，
+// 但字母与数字本身必须完全一致。
+//
+// 之所以连字符也忽略：站点番号形如 "BDM-001"，而输入可能写成
+// "bdm_001" 或 "BDM 001"，若只删下划线/空格会得到 "bdm001"，
+// 仍与 "bdm-001" 对不上，因此统一按字母+数字比较。
+//
+// 例：
+//
+//	"BDM-001"、"bdm-001"、"bdm_001"、" BDM 001 "、"BDM001"
+//	都会归一成 "bdm001"；而 "BDM-002" 归一为 "bdm002"，不相等。
+func normalizeCode(s string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return -1 // 删除所有分隔符（-、_、空格等）
+	}, s))
+}
+
+// codeMatches 判断两个番号在归一化后是否完全一致。
+func codeMatches(a, b string) bool {
+	return normalizeCode(a) == normalizeCode(b)
+}
+
+// ErrNotFound 表示没有与番号准确匹配的结果（站点只返回了相似推荐或没有结果）。
+// 调用方应用 errors.Is 识别它并当作“本条不存在”跳过，而不是视为抓取失败。
+var ErrNotFound = errors.New("没有准确匹配的结果")
+
+// parseSearchResult 解析搜索结果页 HTML，返回详情页路径（形如 /v/xxxx）。
+//
+// 只采信第一条结果（站点通常第一条才是准确匹配），并把第一条
+// div.video-title > strong 里的番号与输入番号做归一化比对，一致才返回，
+// 防止站点在“无准确结果”时返回相似推荐。
+func parseSearchResult(html, code string) (string, error) {
+	doc := soup.HTMLParse(html)
+
+	// TODO: 以下选择器以 javdb 搜索页结构为准，如站点改版需核对。
+	list := doc.Find("div", "class", "movie-list")
+	if list.Error != nil {
+		return "", fmt.Errorf("%w: %s 的搜索结果为空", ErrNotFound, code)
+	}
+	item := list.Find("div", "class", "item")
+	if item.Error != nil {
+		return "", fmt.Errorf("%w: %s 的搜索结果为空", ErrNotFound, code)
+	}
+
+	// div.video-title > strong 里是该结果的真实番号，用来确认不是相似推荐
+	realCode := ""
+	if titleDiv := item.Find("div", "class", "video-title"); titleDiv.Error == nil {
+		if strong := titleDiv.Find("strong"); strong.Error == nil {
+			realCode = strings.TrimSpace(strong.FullText())
+		}
+	}
+	if realCode == "" || !codeMatches(code, realCode) {
+		return "", fmt.Errorf("%w: 番号 %s 的第一条结果为 %q，可能只是相似推荐", ErrNotFound, code, realCode)
+	}
+
+	// 第一个 <a> 指向详情页（href 形如 /v/xxxx）
+	link := item.Find("a")
+	if link.Error != nil {
+		return "", fmt.Errorf("未找到 %s 的详情页链接: %v", code, link.Error)
+	}
+	detailPath := link.Attrs()["href"]
+	if detailPath == "" {
+		return "", fmt.Errorf("未找到 %s 的详情页链接", code)
+	}
+	return detailPath, nil
+}
+
+// parseDetailPage 解析详情页 HTML，返回原文标题与主要演员。
+func parseDetailPage(html string) (title string, actors []string, err error) {
+	doc := soup.HTMLParse(html)
+
+	// 标题：h2.title 里的 strong.current-title（旧版页面为 span.origin-name，
+	// 两者都没有时退化为标题节点的全部文本）
+	titleNode := doc.Find("h2", "class", "title")
+	if titleNode.Error != nil {
+		return "", nil, fmt.Errorf("未找到原文标题: %v", titleNode.Error)
+	}
+	if cur := titleNode.Find("strong", "class", "current-title"); cur.Error == nil {
+		title = cur.FullText()
+	} else if origin := titleNode.Find("span", "class", "origin-name"); origin.Error == nil {
+		title = origin.FullText()
+	}
+	if strings.TrimSpace(title) == "" {
+		title = titleNode.FullText()
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "", nil, errors.New("原文标题为空")
+	}
+
+	// 演员：movie-panel-info 里按 <strong> 的字段名定位 panel-block
+	panel := doc.Find("nav", "class", "movie-panel-info")
+	if panel.Error != nil {
+		return "", nil, fmt.Errorf("未找到信息面板: %v", panel.Error)
+	}
+	// panelField 按字段名（如“演员:”）找对应 panel-block 的 span.value 节点
+	panelField := func(label string) (soup.Root, error) {
+		for _, block := range panel.FindAll("div", "class", "panel-block") {
+			s := block.Find("strong")
+			if s.Error == nil && s.FullText() == label {
+				if v := block.Find("span", "class", "value"); v.Error == nil {
+					return v, nil
+				}
+			}
+		}
+		return soup.Root{}, fmt.Errorf("未找到字段 %q", label)
+	}
+
+	// 演员字段的 span.value 内每个 <a> 是一个演员
+	actorValue, err := panelField("演员:")
+	if err != nil {
+		return "", nil, err
+	}
+	for _, a := range actorValue.FindAll("a") {
+		if name := strings.TrimSpace(a.FullText()); name != "" {
+			actors = append(actors, name)
+		}
+	}
+
+	return title, actors, nil
+}
 
 // FetchInfo 根据番号抓取原文标题。
 func FetchInfo(code string) (*Info, error) {
@@ -140,23 +313,18 @@ func FetchInfo(code string) (*Info, error) {
 		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "+
 			"(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 	soup.Header("Accept-Language", "zh-CN,zh;q=0.9,ja;q=0.8")
-	configureCookies(host)
+	if n := configureCookies(host); n > 0 {
+		fetchLogger.Printf("已加载 %d 个 Cookie", n)
+	}
 
-	html, err := soup.Get(target)
+	html, err := httpGet(target)
 	if err != nil {
-		return nil, fmt.Errorf("请求搜索页失败: %w", err)
+		return nil, err
 	}
-	doc := soup.HTMLParse(html)
 
-	// TODO: 以下选择器以 javdb 搜索页结构为准，如站点改版需核对。
-	// 搜索结果列表 div.movie-list 内，每个 div.item 的第一个 a 指向详情页（href 形如 /v/xxxx）
-	link := doc.Find("div", "class", "movie-list").Find("div", "class", "item").Find("a")
-	if link.Error != nil {
-		return nil, fmt.Errorf("未找到 %s 的搜索结果: %v", code, link.Error)
-	}
-	detailPath := link.Attrs()["href"]
-	if detailPath == "" {
-		return nil, fmt.Errorf("未找到 %s 的详情页链接", code)
+	detailPath, err := parseSearchResult(html, code)
+	if err != nil {
+		return nil, err
 	}
 	// href 可能是相对路径，统一拼成绝对地址
 	if strings.HasPrefix(detailPath, "/") {
@@ -164,32 +332,17 @@ func FetchInfo(code string) (*Info, error) {
 	}
 
 	// 详情页（cookie / header 已在上面设置过，全局生效）
-	detailHTML, err := soup.Get(detailPath)
+	detailHTML, err := httpGet(detailPath)
 	if err != nil {
 		return nil, fmt.Errorf("请求详情页失败: %w", err)
 	}
-	detail := soup.HTMLParse(detailHTML)
 
-	// 原文标题：详情页 <h2 class="title">
-	// 其中 <strong class="current-title"> 是番号本身，真正的标题通常在
-	// <span class="origin-name">（原文名）或标题节点的剩余文本里。
-	titleNode := detail.Find("h2", "class", "title")
-	if titleNode.Error != nil {
-		return nil, fmt.Errorf("未找到原文标题: %v", titleNode.Error)
-	}
-	title := ""
-	if origin := titleNode.Find("span", "class", "origin-name"); origin.Error == nil {
-		title = origin.FullText()
-	}
-	if strings.TrimSpace(title) == "" {
-		title = titleNode.FullText()
-	}
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return nil, errors.New("原文标题为空")
+	title, actors, err := parseDetailPage(detailHTML)
+	if err != nil {
+		return nil, err
 	}
 
-	return &Info{OriginalTitle: title}, nil
+	return &Info{OriginalTitle: title, Actors: actors}, nil
 }
 
 // translateMaxRetry 翻译失败时的最大尝试次数（含首次）
