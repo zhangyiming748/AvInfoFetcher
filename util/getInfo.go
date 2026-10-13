@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/url"
 	"os"
 	"os/exec"
@@ -195,6 +196,21 @@ func codeMatches(a, b string) bool {
 	return normalizeCode(a) == normalizeCode(b)
 }
 
+// 请求之间的随机停顿范围，防止请求频率过快被站点封禁
+const (
+	requestIntervalMin = 1 * time.Second
+	requestIntervalMax = 3 * time.Second
+)
+
+// SleepBetweenRequests 随机停顿 1~3 秒，用于每条番号处理之间、
+// 以及搜索页与详情页请求之间，降低因频率过快被封禁的风险。
+// Go 1.20+ 的全局 rand 自动随机种子，无需手动 Seed。
+func SleepBetweenRequests() {
+	d := requestIntervalMin +
+		time.Duration(rand.Int63n(int64(requestIntervalMax-requestIntervalMin)))
+	time.Sleep(d)
+}
+
 // ErrNotFound 表示没有与番号准确匹配的结果（站点只返回了相似推荐或没有结果）。
 // 调用方应用 errors.Is 识别它并当作“本条不存在”跳过，而不是视为抓取失败。
 var ErrNotFound = errors.New("没有准确匹配的结果")
@@ -281,14 +297,13 @@ func parseDetailPage(html string) (title string, actors []string, err error) {
 		return soup.Root{}, fmt.Errorf("未找到字段 %q", label)
 	}
 
-	// 演员字段的 span.value 内每个 <a> 是一个演员
-	actorValue, err := panelField("演员:")
-	if err != nil {
-		return "", nil, err
-	}
-	for _, a := range actorValue.FindAll("a") {
-		if name := strings.TrimSpace(a.FullText()); name != "" {
-			actors = append(actors, name)
+	// 演员字段的 span.value 内每个 <a> 是一个演员。
+	// 有的影片详情页没有演员信息，缺失时返回空列表即可，不视为失败。
+	if actorValue, err := panelField("演员:"); err == nil {
+		for _, a := range actorValue.FindAll("a") {
+			if name := strings.TrimSpace(a.FullText()); name != "" {
+				actors = append(actors, name)
+			}
 		}
 	}
 
@@ -330,6 +345,9 @@ func FetchInfo(code string) (*Info, error) {
 	if strings.HasPrefix(detailPath, "/") {
 		detailPath = siteBase + detailPath
 	}
+
+	// 搜索页与详情页请求之间随机停 1~3 秒，防止频率过快被封禁
+	SleepBetweenRequests()
 
 	// 详情页（cookie / header 已在上面设置过，全局生效）
 	detailHTML, err := httpGet(detailPath)

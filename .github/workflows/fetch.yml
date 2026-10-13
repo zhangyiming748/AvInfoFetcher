@@ -16,6 +16,7 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # 兜底：网络挂起时避免任务一直耗到 6h 默认上限
     steps:
       - name: Checkout
         uses: actions/checkout@v4

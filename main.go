@@ -4,16 +4,12 @@ import (
 	"errors"
 	"log"
 	"strings"
-	"time"
 
 	"AvInfoFetcher/util"
 )
 
 // csvPath CSV 文件固定为 workspace 下的 vid.csv
 const csvPath = "vid.csv"
-
-// requestInterval 每条番号处理完后的等待时间，避免请求过快
-const requestInterval = 3 * time.Second
 
 func main() {
 	records, err := util.LoadCSV(csvPath)
@@ -47,13 +43,13 @@ func main() {
 				// 番号在库里不存在（或只有相似推荐）：跳过本条，
 				// 不算失败、不回写，下次运行还会再试（结果一般仍是未找到）
 				log.Printf("[未找到] %s 没有准确匹配的结果，跳过本条", code)
-				time.Sleep(requestInterval)
+				util.SleepBetweenRequests()
 				continue
 			}
 			// 查询失败：不回写，保持空白，下次运行自动重试
 			log.Printf("[失败] %s 抓取信息出错: %v（本次跳过，下次重试）", code, err)
 			failed++
-			time.Sleep(requestInterval)
+			util.SleepBetweenRequests()
 			continue
 		}
 
@@ -62,13 +58,17 @@ func main() {
 			// 翻译失败同样不回写整行，下次重试
 			log.Printf("[失败] %s 翻译出错: %v（本次跳过，下次重试）", code, err)
 			failed++
-			time.Sleep(requestInterval)
+			util.SleepBetweenRequests()
 			continue
 		}
 
 		// 回写内存中的该行
 		row[util.ColOriginalTitle] = strings.TrimSpace(info.OriginalTitle)
 		row[util.ColChineseTitle] = strings.TrimSpace(zh)
+		// 主演写入备注列；只在备注为空时写，避免覆盖人工填写的内容
+		if row[util.ColRemark] == "" && len(info.Actors) > 0 {
+			row[util.ColRemark] = strings.Join(info.Actors, "、")
+		}
 		records[i] = row
 
 		// 每处理完一条立即落盘，防止中途超时/崩溃丢掉结果
@@ -77,7 +77,7 @@ func main() {
 		}
 		log.Printf("[完成] %s -> %s", code, zh)
 		processed++
-		time.Sleep(requestInterval)
+		util.SleepBetweenRequests()
 	}
 
 	log.Printf("全部结束：成功 %d 条，失败/待重试 %d 条", processed, failed)
