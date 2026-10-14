@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -215,6 +216,29 @@ func SleepBetweenRequests() {
 // 调用方应用 errors.Is 识别它并当作“本条不存在”跳过，而不是视为抓取失败。
 var ErrNotFound = errors.New("没有准确匹配的结果")
 
+// saveArtifactHTML 把请求到的 HTML 保存到 artifacts/ 目录，供事后排查或作为 workflow artifact 上传。
+// 文件名格式：artifacts/{code}_{pageType}.html（pageType 为 search / detail）
+func saveArtifactHTML(code, pageType, html string) {
+	dir := "artifacts"
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fetchLogger.Printf("警告：创建 artifacts 目录失败: %v", err)
+		return
+	}
+	// 番号可能含路径分隔符等不安全字符，统一替换为下划线
+	safeCode := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, code)
+	path := filepath.Join(dir, safeCode+"_"+pageType+".html")
+	if err := os.WriteFile(path, []byte(html), 0o644); err != nil {
+		fetchLogger.Printf("警告：保存 %s 失败: %v", path, err)
+		return
+	}
+	fetchLogger.Printf("已保存 %s (%d 字节)", path, len(html))
+}
+
 // parseSearchResult 解析搜索结果页 HTML，返回详情页路径（形如 /v/xxxx）。
 //
 // 只采信第一条结果（站点通常第一条才是准确匹配），并把第一条
@@ -336,6 +360,7 @@ func FetchInfo(code string) (*Info, error) {
 	if err != nil {
 		return nil, err
 	}
+	saveArtifactHTML(code, "search", html)
 
 	detailPath, err := parseSearchResult(html, code)
 	if err != nil {
@@ -354,6 +379,7 @@ func FetchInfo(code string) (*Info, error) {
 	if err != nil {
 		return nil, fmt.Errorf("请求详情页失败: %w", err)
 	}
+	saveArtifactHTML(code, "detail", detailHTML)
 
 	title, actors, err := parseDetailPage(detailHTML)
 	if err != nil {

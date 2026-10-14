@@ -47,3 +47,14 @@ jobs:
           else
             echo "vid.csv 无变化，跳过提交"
           fi
+
+      # 把本次抓取到的搜索页/详情页 HTML 上传为 artifact，便于事后排查
+      # （比如遇到 Cloudflare 拦截时能看到实际返回的页面）
+      - name: Upload fetched HTML artifacts
+        if: always() # 即使前面步骤失败也上传，拦截/异常时恰恰最需要看
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetched-html-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
