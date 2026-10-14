@@ -105,9 +105,30 @@ func padRow(row []string, n int) []string {
 	return padded
 }
 
-// IsProcessed 判断一行是否已经处理过：
-// 以“原文标题”列是否有内容为准（而不是“是否不止番号一列”，
-// 因为人工预填“备注”等列不应被误判为已处理）。
-func IsProcessed(row []string) bool {
-	return len(row) > ColOriginalTitle && row[ColOriginalTitle] != ""
+// RowState 一行的处理状态
+type RowState int
+
+const (
+	// RowNew 全新行：只有番号，其余列为空，需要完整抓取
+	RowNew RowState = iota
+	// RowNeedTranslate 有番号+原文标题但没有中文标题：
+	// 上次抓取成功但翻译失败，直接拿原文标题翻译即可，不用重新抓取
+	RowNeedTranslate
+	// RowDone 原文标题和中文标题都有，视为已完成
+	RowDone
+)
+
+// StateOf 判断一行的处理状态。
+// 以“原文标题”“中文标题”两列是否有内容为准（人工预填“备注”列不影响判断）。
+func StateOf(row []string) RowState {
+	hasOriginal := len(row) > ColOriginalTitle && strings.TrimSpace(row[ColOriginalTitle]) != ""
+	hasChinese := len(row) > ColChineseTitle && strings.TrimSpace(row[ColChineseTitle]) != ""
+	switch {
+	case hasOriginal && hasChinese:
+		return RowDone
+	case hasOriginal:
+		return RowNeedTranslate
+	default:
+		return RowNew
+	}
 }

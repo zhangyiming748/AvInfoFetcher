@@ -37,8 +37,8 @@ func init() {
 
 // Info 爬虫根据番号查到的信息
 type Info struct {
-	OriginalTitle string   // 原文标题
-	Actors        []string // 主要演员
+	OriginalTitle string // 原文标题
+	Cover         string // 封面缩略图 URL（写入备注列）
 }
 
 // Cookie 从环境变量 AV_FETCH_COOKIE 读取，支持两种格式（自动识别）：
@@ -312,15 +312,15 @@ func parseSearchResult(html, code string) (string, error) {
 	return detailPath, nil
 }
 
-// parseDetailPage 解析详情页 HTML，返回原文标题与主要演员。
-func parseDetailPage(html string) (title string, actors []string, err error) {
+// parseDetailPage 解析详情页 HTML，返回原文标题与封面缩略图 URL。
+func parseDetailPage(html string) (title, cover string, err error) {
 	doc := soup.HTMLParse(html)
 
 	// 标题：h2.title 里的 strong.current-title（旧版页面为 span.origin-name，
 	// 两者都没有时退化为标题节点的全部文本）
 	titleNode := doc.Find("h2", "class", "title")
 	if titleNode.Error != nil {
-		return "", nil, fmt.Errorf("未找到原文标题: %v", titleNode.Error)
+		return "", "", fmt.Errorf("未找到原文标题: %v", titleNode.Error)
 	}
 	if cur := titleNode.Find("strong", "class", "current-title"); cur.Error == nil {
 		title = cur.FullText()
@@ -332,38 +332,16 @@ func parseDetailPage(html string) (title string, actors []string, err error) {
 	}
 	title = strings.TrimSpace(title)
 	if title == "" {
-		return "", nil, errors.New("原文标题为空")
+		return "", "", errors.New("原文标题为空")
 	}
 
-	// 演员：movie-panel-info 里按 <strong> 的字段名定位 panel-block
-	panel := doc.Find("nav", "class", "movie-panel-info")
-	if panel.Error != nil {
-		return "", nil, fmt.Errorf("未找到信息面板: %v", panel.Error)
-	}
-	// panelField 按字段名（如“演员:”）找对应 panel-block 的 span.value 节点
-	panelField := func(label string) (soup.Root, error) {
-		for _, block := range panel.FindAll("div", "class", "panel-block") {
-			s := block.Find("strong")
-			if s.Error == nil && s.FullText() == label {
-				if v := block.Find("span", "class", "value"); v.Error == nil {
-					return v, nil
-				}
-			}
-		}
-		return soup.Root{}, fmt.Errorf("未找到字段 %q", label)
+	// 封面缩略图：div.column-video-cover 内 img.video-cover 的 src。
+	// 找不到不视为失败（有的页面可能缺封面），返回空串即可。
+	if img := doc.Find("img", "class", "video-cover"); img.Error == nil {
+		cover = strings.TrimSpace(img.Attrs()["src"])
 	}
 
-	// 演员字段的 span.value 内每个 <a> 是一个演员。
-	// 有的影片详情页没有演员信息，缺失时返回空列表即可，不视为失败。
-	if actorValue, err := panelField("演员:"); err == nil {
-		for _, a := range actorValue.FindAll("a") {
-			if name := strings.TrimSpace(a.FullText()); name != "" {
-				actors = append(actors, name)
-			}
-		}
-	}
-
-	return title, actors, nil
+	return title, cover, nil
 }
 
 // FetchInfo 根据番号抓取原文标题。
@@ -409,12 +387,12 @@ func FetchInfo(code string) (*Info, error) {
 	}
 	saveArtifactHTML(code, "detail", detailHTML)
 
-	title, actors, err := parseDetailPage(detailHTML)
+	title, cover, err := parseDetailPage(detailHTML)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Info{OriginalTitle: title, Actors: actors}, nil
+	return &Info{OriginalTitle: title, Cover: cover}, nil
 }
 
 // translateMaxRetry 翻译失败时的最大尝试次数（含首次）

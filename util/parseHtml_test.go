@@ -2,7 +2,6 @@ package util
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -143,96 +142,38 @@ func TestParseSearchResultNotFound(t *testing.T) {
 	t.Logf("匹配成功，详情页路径: %s", path)
 }
 
-// TestParseDetailPage 解析详情页，验证能否取到番号、标题和主要演员。
+// TestParseDetailPage 用真实详情页（util/detail.html）验证 parseDetailPage
+// 能取到原文标题和封面缩略图 URL。
 //
-// 对应真实详情页结构（util/detail.html）：
+// 对应结构：
 //
 //	<h2 class="title is-4">
-//	  <strong>BDM-001 </strong>                                  ← 番号（冗余来源）
+//	  <strong>BDM-001 </strong>                                  ← 番号
 //	  <strong class="current-title">巨乳美女ドM喉ま○こ… </strong> ← 标题
 //	</h2>
-//	<nav class="panel movie-panel-info">
-//	  <div class="panel-block first-block">
-//	    <strong>番号:</strong>&nbsp;<span class="value"><a href="/video_codes/BDM">BDM</a>-001</span>
-//	  </div>
-//	  ...
-//	  <div class="panel-block">
-//	    <strong>演员:</strong>&nbsp;<span class="value">
-//	      <a class="actor-female" href="/actors/0Qaa">愛内かおり</a>
-//	    </span>
-//	  </div>
-//	</nav>
-//
-// 把 javdb 详情页源码保存到 util/detail.html 后运行：
+//	<div class="column column-video-cover">
+//	  <a data-fancybox="gallery" href="https://c0.jdbstatic.com/covers/mq/mQNQv.jpg">
+//	    <img class="video-cover" src="https://c0.jdbstatic.com/covers/mq/mQNQv.jpg"> ← 封面
+//	  </a>
+//	</div>
 //
 //	go test ./util -run TestParseDetailPage -v
 func TestParseDetailPage(t *testing.T) {
 	html := readTestHTML(t, "detail.html")
-	doc := soup.HTMLParse(html)
 
-	// ---- 标题：h2.title 里的 strong.current-title ----
-	titleNode := doc.Find("h2", "class", "title")
-	if titleNode.Error != nil {
-		t.Fatalf("未找到 h2.title: %v", titleNode.Error)
+	title, cover, err := parseDetailPage(html)
+	if err != nil {
+		t.Fatalf("parseDetailPage 失败: %v", err)
 	}
-	title := ""
-	if cur := titleNode.Find("strong", "class", "current-title"); cur.Error == nil {
-		title = cur.FullText()
-	} else if origin := titleNode.Find("span", "class", "origin-name"); origin.Error == nil {
-		// 兼容旧版页面的 span.origin-name 结构
-		title = origin.FullText()
-	}
-	if strings.TrimSpace(title) == "" {
-		title = titleNode.FullText()
-	}
-	title = strings.TrimSpace(title)
 	t.Logf("标题: %q", title)
+	t.Logf("封面: %q", cover)
 	if title == "" {
 		t.Fatal("标题为空")
 	}
-
-	// ---- 番号与演员：movie-panel-info 里按 <strong> 文本定位 panel-block ----
-	panel := doc.Find("nav", "class", "movie-panel-info")
-	if panel.Error != nil {
-		t.Fatalf("未找到 nav.movie-panel-info: %v", panel.Error)
+	if cover == "" {
+		t.Fatal("封面缩略图为空")
 	}
-	// panelField 按字段名（如“番号:”“演员:”）找对应 panel-block 的 span.value
-	panelField := func(label string) soup.Root {
-		for _, block := range panel.FindAll("div", "class", "panel-block") {
-			s := block.Find("strong")
-			if s.Error == nil && s.FullText() == label {
-				if v := block.Find("span", "class", "value"); v.Error == nil {
-					return v
-				}
-			}
-		}
-		return soup.Root{Error: fmt.Errorf("未找到字段 %q", label)}
-	}
-
-	// 番号：span.value 的完整文本（如 <a>BDM</a>-001 -> "BDM-001"）
-	codeValue := panelField("番号:")
-	if codeValue.Error != nil {
-		t.Fatalf("%v", codeValue.Error)
-	}
-	code := strings.TrimSpace(codeValue.FullText())
-	t.Logf("番号: %q", code)
-	if code == "" {
-		t.Fatal("番号为空")
-	}
-
-	// 主要演员：span.value 内每个 <a> 是一个演员
-	actorValue := panelField("演员:")
-	if actorValue.Error != nil {
-		t.Fatalf("%v", actorValue.Error)
-	}
-	var actors []string
-	for _, a := range actorValue.FindAll("a") {
-		if name := strings.TrimSpace(a.FullText()); name != "" {
-			actors = append(actors, name)
-		}
-	}
-	t.Logf("主要演员: %v", actors)
-	if len(actors) == 0 {
-		t.Fatal("演员列表为空")
+	if !strings.HasPrefix(cover, "https://") {
+		t.Fatalf("封面不是完整 URL: %q", cover)
 	}
 }
