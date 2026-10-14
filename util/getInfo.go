@@ -162,6 +162,14 @@ func httpGet(target string) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	// 站点对未登录/Cookie 失效的请求会 302 到登录页，httpClient 自动跟随
+	// 重定向后最终 URL 会落在 /login。必须在这里识别出来，否则后面会把
+	// 登录页当成搜索结果页，误报成 ErrNotFound（“没有搜索结果”）。
+	if finalURL := resp.Request.URL.String(); strings.Contains(resp.Request.URL.Path, "/login") {
+		fetchLogger.Printf("BLOCKED %s -> 被重定向到登录页 %s（Cookie 失效或未登录）", target, finalURL)
+		return "", fmt.Errorf("Cookie 失效或未登录：被重定向到登录页 %s", finalURL)
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fetchLogger.Printf("FAIL %s -> 读取响应体失败: %v", target, err)
