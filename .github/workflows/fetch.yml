@@ -1,10 +1,11 @@
 name: fetch-av-info
 
 on:
-  schedule:
-    # 每天 UTC 16:00（北京时间次日 00:00）跑一次
-    - cron: "0 16 * * *"
-  workflow_dispatch: {} # 也支持手动触发
+  # 手动触发，或 vid.csv 有变化（人工添加番号后推送）时触发
+  push:
+    paths:
+      - vid.csv
+  workflow_dispatch: {}
 
 permissions:
   contents: write # 允许 workflow 提交并推送
@@ -15,14 +16,19 @@ concurrency:
 
 jobs:
   fetch:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    # 本 workflow 回写 vid.csv 的自动提交带 [skip ci]，跳过以避免自我触发死循环
+    # （GitHub 本身也识别 [skip ci]，这里再加一层显式判断兜底）
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !contains(github.event.head_commit.message, '[skip ci]')
     timeout-minutes: 30 # 兜底：网络挂起时避免任务一直耗到 6h 默认上限
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -52,7 +58,7 @@ jobs:
       # （比如遇到 Cloudflare 拦截时能看到实际返回的页面）
       - name: Upload fetched HTML artifacts
         if: always() # 即使前面步骤失败也上传，拦截/异常时恰恰最需要看
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fetched-html-${{ github.run_id }}
           path: artifacts/

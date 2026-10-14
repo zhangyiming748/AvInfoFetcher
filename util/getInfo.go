@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -40,23 +41,6 @@ type Info struct {
 	Actors        []string // 主要演员
 }
 
-// ---- soup 发 GET 请求时携带 Cookie 的两种方式 ----
-//
-// 方式一（推荐，单个设置）：在 soup.Get 之前调用
-//
-//	soup.Cookie("key", "value")
-//
-// 可以多次调用设置多个 cookie；也可以设置全局请求头：
-//
-//	soup.Header("User-Agent", "Mozilla/5.0 ...")
-//
-// 方式二（批量设置）：直接给全局 map 赋值
-//
-//	soup.Cookies = map[string]string{"key1": "v1", "key2": "v2"}
-//
-// 注意：soup.Cookie / soup.Cookies 是包级全局状态，会影响之后所有 soup.Get，
-// 因此在函数开头统一设置即可。
-//
 // Cookie 从环境变量 AV_FETCH_COOKIE 读取，支持两种格式（自动识别）：
 //  1. Netscape cookies.txt 格式（浏览器插件 / curl cookie jar 批量导出），
 //     每行 7 个 Tab 分隔字段：domain  includeSubdomains  path  secure
@@ -64,10 +48,15 @@ type Info struct {
 //     ——整个导出文件可原样粘贴进 GitHub secret（支持多行）；
 //     程序会按目标域名过滤、丢弃已过期的 cookie。
 //  2. 请求头格式：key1=v1; key2=v2（从浏览器开发者工具复制的那种）。
+//
+// 解析结果存到包级变量 requestCookies，由 httpGet 在每次请求时附加。
 type cookiePair struct {
 	Name  string
 	Value string
 }
+
+// requestCookies 当前生效的 Cookie（configureCookies 设置，httpGet 使用）
+var requestCookies []cookiePair
 
 // parseCookieEnv 解析 AV_FETCH_COOKIE 的内容，只返回属于 host 域名的未过期 cookie。
 func parseCookieEnv(raw, host string) []cookiePair {
@@ -126,42 +115,77 @@ func parseCookieEnv(raw, host string) []cookiePair {
 	return pairs
 }
 
-// configureCookies 读取环境变量并把 cookie 设置到 soup 的全局配置中。
+// configureCookies 读取环境变量，解析出属于 host 的 cookie 存入包级变量。
 // 返回实际加载的 Cookie 数量，便于日志排查。
 func configureCookies(host string) int {
 	raw := strings.TrimSpace(os.Getenv("AV_FETCH_COOKIE"))
 	if raw == "" {
+		requestCookies = nil
 		return 0
 	}
-	pairs := parseCookieEnv(raw, host)
-	for _, c := range pairs {
-		soup.Cookie(c.Name, c.Value)
-	}
-	return len(pairs)
+	requestCookies = parseCookieEnv(raw, host)
+	return len(requestCookies)
 }
 
 // ErrCloudflareBlocked 表示请求被 Cloudflare 等防护页拦截（返回 200 但内容是拦截页）。
 var ErrCloudflareBlocked = errors.New("请求被 Cloudflare 拦截")
 
-// httpGet 发 GET 请求并记录日志。返回内容；如被拦截则返回 ErrCloudflareBlocked。
-func httpGet(url string) (string, error) {
-	fetchLogger.Printf("GET %s", url)
-	html, err := soup.Get(url)
+// httpClient 统一的 HTTP 客户端。必须带超时：soup.Get 无超时，
+// 网络挂起时会一直卡住，直到 workflow 的 timeout-minutes 兜底。
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+const (
+	userAgent      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+	acceptLanguage = "zh-CN,zh;q=0.9,ja;q=0.8"
+)
+
+// httpGet 发 GET 请求并记录日志（URL、状态码、字节数、底层错误）。
+// 返回内容；被拦截返回 ErrCloudflareBlocked；非 200 返回带状态码的错误。
+func httpGet(target string) (string, error) {
+	fetchLogger.Printf("GET %s", target)
+
+	req, err := http.NewRequest(http.MethodGet, target, nil)
 	if err != nil {
-		fetchLogger.Printf("FAIL %s -> %v", url, err)
-		return "", fmt.Errorf("请求失败: %w", err)
+		return "", fmt.Errorf("构造请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept-Language", acceptLanguage)
+	for _, c := range requestCookies {
+		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
 	}
 
-	// Cloudflare 拦截页特征（正常详情页含 Cloudflare analytics，但不会是 Just a moment 标题）
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		// 底层错误（TLS 失败/连接重置/超时等）完整记录，soup 会把这层吞掉
+		fetchLogger.Printf("FAIL %s -> %v", target, err)
+		return "", fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fetchLogger.Printf("FAIL %s -> 读取响应体失败: %v", target, err)
+		return "", fmt.Errorf("读取响应体失败: %w", err)
+	}
+	html := string(body)
+	fetchLogger.Printf("RESP %s status=%d len=%d", target, resp.StatusCode, len(html))
+
+	// Cloudflare 拦截：403/503 状态码，或 200 但内容是质询页
+	// （正常详情页含 Cloudflare analytics，但不会是 Just a moment 标题）
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusServiceUnavailable {
+		fetchLogger.Printf("BLOCKED %s status=%d", target, resp.StatusCode)
+		return "", fmt.Errorf("%w（HTTP %d）", ErrCloudflareBlocked, resp.StatusCode)
+	}
 	lower := strings.ToLower(html)
 	if strings.Contains(lower, "just a moment") ||
 		strings.Contains(lower, "attention required") ||
 		strings.Contains(lower, "cloudflare") && strings.Contains(lower, "verify you are human") {
-		fetchLogger.Printf("BLOCKED %s (Cloudflare/Just a moment), len=%d", url, len(html))
+		fetchLogger.Printf("BLOCKED %s (Cloudflare/Just a moment), len=%d", target, len(html))
 		return "", ErrCloudflareBlocked
 	}
-
-	fetchLogger.Printf("OK %s len=%d", url, len(html))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP 状态码异常: %d", resp.StatusCode)
+	}
 	return html, nil
 }
 
@@ -347,11 +371,7 @@ func FetchInfo(code string) (*Info, error) {
 	targetURL, _ := url.Parse(target)
 	host := targetURL.Hostname()
 
-	// 统一设置请求头与 cookie（soup 包级全局配置；cookie 按目标域名过滤）
-	soup.Header("User-Agent",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "+
-			"(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-	soup.Header("Accept-Language", "zh-CN,zh;q=0.9,ja;q=0.8")
+	// 加载 Cookie（请求头在 httpGet 里统一设置）
 	if n := configureCookies(host); n > 0 {
 		fetchLogger.Printf("已加载 %d 个 Cookie", n)
 	}
