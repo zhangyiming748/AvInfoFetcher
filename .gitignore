@@ -4,3 +4,4 @@ fetch.log
 artifacts/
 util/detail.html
 util/search.html
+*.db
