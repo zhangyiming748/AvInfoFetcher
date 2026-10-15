@@ -123,6 +123,33 @@ func TestCodeMatches(t *testing.T) {
 	}
 }
 
+// TestSanitizeTitle 验证标题规范化：中文标点转英文标点，
+// 文件系统不允许的字符（\ / : * ? " < > |）转空格，并合并多余空白。
+func TestSanitizeTitle(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"全角与号", "巨乳美女＆子宮調教", "巨乳美女&子宮調教"},
+		{"全角波浪线", "アスリートマニア17 ～競泳編～", "アスリートマニア17 ~競泳編~"},
+		{"句号", "掌控脏话。控制射精", "掌控脏话.控制射精"},
+		{"书名号方括号", "【FANZA限定】系列記念！", "[FANZA限定]系列記念!"},
+		{"问号转空格去尾", "特別編？", "特別編"},
+		{"冒号转空格", "A：B", "A B"},
+		{"省略号", "テスト……終", "テスト...終"},
+		{"多余空白合并", "  A   B  ", "A B"},
+		{"空串", "   ", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SanitizeTitle(c.in); got != c.want {
+				t.Fatalf("SanitizeTitle(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // TestParseSearchResultNotFound 验证当第一条结果与输入番号不一致（相似推荐）时，
 // parseSearchResult 返回 ErrNotFound，调用方据此跳过本条而不是当作失败。
 func TestParseSearchResultNotFound(t *testing.T) {

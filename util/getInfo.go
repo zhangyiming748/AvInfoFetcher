@@ -229,6 +229,52 @@ func codeMatches(a, b string) bool {
 	return normalizeCode(a) == normalizeCode(b)
 }
 
+// titlePunctReplacer 把不在全角 ASCII 区（U+FF01–U+FF5E）里的中文标点
+// 替换为英文标点；全角 ASCII 区由 SanitizeTitle 里的统一平移处理，不在此列。
+// 多字符组合（如“……”）放在前面，保证优先整体匹配。
+var titlePunctReplacer = strings.NewReplacer(
+	"……", "...",
+	"——", "-",
+	"‘", "'", "’", "'",
+	"“", `"`, "”", `"`,
+	"、", ",", "。", ".",
+	"〈", "<", "〉", ">",
+	"《", "<", "》", ">",
+	"「", `"`, "」", `"`,
+	"『", `"`, "』", `"`,
+	"【", "[", "】", "]",
+	"〔", "[", "〕", "]",
+	"—", "-", "–", "-",
+	"…", ".",
+	"·", ".", "・", ".",
+)
+
+// fsUnsafeChars 文件名中不允许出现的字符（按 Windows 的最严格规则为准）。
+const fsUnsafeChars = `\/:*?"<>|`
+
+// SanitizeTitle 规范化标题文本，使其标点统一且可直接用作文件名：
+//  1. 中文（全角）标点统一替换为对应的英文半角标点；
+//  2. 替换后仍不被文件系统允许的字符（\ / : * ? " < > | 及控制字符）改成空格；
+//  3. 合并因替换产生的连续空白并去掉首尾空白。
+//
+// 例：
+//
+//	“巨乳美女＆子宮調教：特別編？” -> "巨乳美女&子宮調教 特別編"
+func SanitizeTitle(s string) string {
+	s = titlePunctReplacer.Replace(s)
+	s = strings.Map(func(r rune) rune {
+		// 全角 ASCII（U+FF01–U+FF5E）整体平移 -0xFEE0 即为对应半角字符
+		if r >= 0xFF01 && r <= 0xFF5E {
+			r -= 0xFEE0
+		}
+		if r < 0x20 || strings.ContainsRune(fsUnsafeChars, r) {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // 请求之间的随机停顿范围，防止请求频率过快被站点封禁
 const (
 	requestIntervalMin = 1 * time.Second

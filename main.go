@@ -20,6 +20,24 @@ func main() {
 		log.Fatal("CSV 为空（连表头都没有）")
 	}
 
+	// 先统一规范历史数据里的标题：中文标点转英文标点，
+	// 文件系统不允许的字符转空格（有的行是之前版本写入的，可能带全角标点）
+	normalized := false
+	for i := 1; i < len(records); i++ {
+		for _, col := range []int{util.ColOriginalTitle, util.ColChineseTitle} {
+			if fixed := util.SanitizeTitle(records[i][col]); fixed != records[i][col] {
+				records[i][col] = fixed
+				normalized = true
+			}
+		}
+	}
+	if normalized {
+		if err := util.SaveCSV(csvPath, records); err != nil {
+			log.Fatalf("[严重] 规范历史标题后写回 CSV 失败: %v", err)
+		}
+		log.Println("[规范] 已把标题列里的中文标点替换为英文标点")
+	}
+
 	// 记录初始状态，跑完后判断文件是否有变化
 	initialCSV := serialize(records)
 
@@ -46,12 +64,12 @@ func main() {
 				failed++
 				continue
 			}
-			row[util.ColChineseTitle] = strings.TrimSpace(zh)
+			row[util.ColChineseTitle] = util.SanitizeTitle(zh)
 			records[i] = row
 			if err := util.SaveCSV(csvPath, records); err != nil {
 				log.Fatalf("[严重] %s 写回 CSV 失败: %v", code, err)
 			}
-			log.Printf("[完成] %s -> %s", code, zh)
+			log.Printf("[完成] %s -> %s", code, row[util.ColChineseTitle])
 			processed++
 			continue
 		}
@@ -75,7 +93,7 @@ func main() {
 		}
 
 		// 抓取成功先回写原文标题：即使后面翻译失败，下次也能走"仅补翻译"分支
-		row[util.ColOriginalTitle] = strings.TrimSpace(info.OriginalTitle)
+		row[util.ColOriginalTitle] = util.SanitizeTitle(info.OriginalTitle)
 		// 备注列写封面缩略图 URL；只在备注为空时写，避免覆盖人工填写的内容
 		if row[util.ColRemark] == "" && info.Cover != "" {
 			row[util.ColRemark] = info.Cover
@@ -94,14 +112,14 @@ func main() {
 			continue
 		}
 
-		row[util.ColChineseTitle] = strings.TrimSpace(zh)
+		row[util.ColChineseTitle] = util.SanitizeTitle(zh)
 		records[i] = row
 
 		// 每处理完一条立即落盘，防止中途超时/崩溃丢掉结果
 		if err := util.SaveCSV(csvPath, records); err != nil {
 			log.Fatalf("[严重] %s 写回 CSV 失败: %v", code, err)
 		}
-		log.Printf("[完成] %s -> %s", code, zh)
+		log.Printf("[完成] %s -> %s", code, row[util.ColChineseTitle])
 		processed++
 		util.SleepBetweenRequests()
 	}
